@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools >= 64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name="cachemir"
+version="0.0.1"
+description="SHORT DESC."
+readme="README.md"
+authors=[
+    {name="MatteoLacki",email="matteo.lacki@gmail.com"},
+]
+dependencies = [
+    "click",
+]
+requires-python = ">=3.6"
+
+
+[project.scripts]
+example_shell_script = "cachemir.cli.example_shell_script:example_shell_script"
+
+[project.urls]
+homepage="https://github.com/MatteoLacki/cachemir.git"
+repository="https://github.com/MatteoLacki/cachemir.git"
+
+[tool.uv]
+reinstall-package = ["cachemir"]
+
+# [tool.pytest.ini_options]
+# testpaths = ["tests"]
+
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+cachemir = ["data/*.csv"]
