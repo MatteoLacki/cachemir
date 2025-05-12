@@ -8,7 +8,7 @@ TODO:
 
 
 """
-from future import __annotations__
+from __future__ import annotations
 
 import fcntl
 import json
@@ -30,9 +30,10 @@ class Index:
 
     Supposed to store indices and some non-grouped statistics.
     """
+
     path: Path
-    map_size: int=2**30
-    max_dbs: int=1
+    map_size: int = 2**30
+    max_dbs: int = 1
 
     @contextmanager
     def open(self, mode="r"):
@@ -51,14 +52,14 @@ class Index:
             env.close()
 
 
-SHAPE = int|tuple[int,...]
+SHAPE = int | tuple[int, ...]
 
 
 @dataclass
 class DataSet:
     path: Path
     dtype: dtype
-    name: str=""
+    name: str = ""
 
     @classmethod
     def new(cls, path, dtype, shape, name, memmap_kwargs={}, **kwargs) -> DataSet:
@@ -72,15 +73,15 @@ class DataSet:
 
     @contextmanager
     def open(
-        self, 
+        self,
         mode: str = "r",
-        verbose: bool=False,
+        verbose: bool = False,
     ):
         file = open(path, file_mode)
         try:
             fcntl.flock(file, fcntl.LOCK_SH if mode in ("r", "rb") else fcntl.LOCK_EX)
             array = np.load(file, mmap_mode=mode)
-            yield array 
+            yield array
         finally:
             if not mode in self._reader_modes:
                 flush_start = time()
@@ -101,27 +102,31 @@ class DataTransaction:
         return self.index_stats()["entries"]
 
 
+# TODO: merge __init__ and new cause it is essentially the same thing?
 class Cachemir:
-    def __init__(self, folder: str|Path) -> None:
+    def __init__(self, folder: str | Path) -> None:
         """Open EXISTING dataset folder."""
         self.folder = Path(folder)
+
         with open(self.folder / "scheme.json", "r") as f:
             scheme = json.load(f)
         for col, dtype in scheme.items():
             assert (self.folder / f"data/{col}.npy").exists()
-        self.index = Index(path=folder/"index", **index_kwargs)
+        self.index = Index(path=folder / "index", **index_kwargs)
         self.datasets = DotDict(
-            col: DataSet(folder / "data/{col}.npy", dtype, col)
-            for col, dtype in scheme.items() 
+            (
+                (col, DataSet(folder / "data/{col}.npy", dtype, col))
+                for col, dtype in scheme.items()
+            )
         )
 
     @classmethod
     def new(
         cls,
-        folder: str|Path,
-        scheme: dict["str",type],
-        shape: SHAPE=0,
-        index_kwargs: dict[str,str|int]={},
+        folder: str | Path,
+        scheme: dict["str", type],
+        shape: SHAPE = 0,
+        index_kwargs: dict[str, str | int] = {},
     ) -> Cachemir:
         """Create new dataset folder.
 
@@ -136,22 +141,21 @@ class Cachemir:
             (folder / subfolder).mkdir(parents=True)
         with open(folder / "scheme.json", "w") as f:
             json.dump(np.dtype(list(scheme.items())).descr, f)
-        index = Index(path=folder / "index")# **kwargs likely unnecessary: make sure
+        index = Index(path=folder / "index")  # **kwargs likely unnecessary: make sure
         datasets = DotDict(
-            col: DataSet.new(folder / f"data/{col}.npy", dtype, shape, col)
-            for col, dtype in scheme.items()
+            (
+                (col, DataSet.new(folder / f"data/{col}.npy", dtype, shape, col))
+                for col, dtype in scheme.items()
+            )
         )
         return cls(folder)
-    
-    @contextmanager    
-    def open(self, mode: str="r") -> Iterator[DataTransaction]:
+
+    @contextmanager
+    def open(self, mode: str = "r") -> Iterator[DataTransaction]:
         with ExitStack() as stack:
             yield DataTransaction(
-                index = self.index.open(mode),
-                datasets = DotDict(col: dataset.open() for col, dataset in self.datasets )
+                index=self.index.open(mode),
+                datasets=DotDict(
+                    ((col, dataset.open()) for col, dataset in self.datasets)
+                ),
             )
-            
-
-
-cachemir = Cachemir.open(folder)
-with cachemir:
