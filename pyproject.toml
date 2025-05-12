@@ -5,16 +5,25 @@ build-backend = "setuptools.build_meta"
 [project]
 name="cachemir"
 version="0.0.1"
-description="SHORT DESC."
+description="Cache-ing for batch calculations based on memory mapped structures.."
 readme="README.md"
 authors=[
     {name="MatteoLacki",email="matteo.lacki@gmail.com"},
 ]
 dependencies = [
-    "click",
+    "numpy",
+    "lmdb",
 ]
 requires-python = ">=3.6"
 
+[project.optional-dependencies]
+dev = [
+    "click",# will be needed for defragmentation scripts? frankly will turn to be a trouble makes...`
+    "twine",
+    "pytest",
+    "pandas",
+    "fastparquet",
+]
 
 [project.scripts]
 example_shell_script = "cachemir.cli.example_shell_script:example_shell_script"

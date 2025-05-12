@@ -2,14 +2,14 @@ make:
 	echo "Welcome to Project 'cachemir'"
 
 upload_test_pypi:
-	rm -rf dist || True
-	python setup.py sdist
-	twine -r testpypi dist/* 
+	twine check dist/*
+	python -m pip install --upgrade twine
+	twine upload --repository testpypi dist/*
 
 upload_pypi:
-	rm -rf dist || True
-	python setup.py sdist
+	twine check dist/*
+	python -m pip install --upgrade twine
 	twine upload dist/* 
 
 ve_cachemir:
-	python3 -m venv ve_cachemir
+	python3 -m venv ../ve_cachemir
