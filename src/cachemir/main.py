@@ -12,6 +12,9 @@ from future import __annotations__
 
 import fcntl
 import json
+import lmdb
+
+from typing import Iterator
 
 from contextlib import ExitStack
 from contextlib import contextmanager
@@ -55,12 +58,7 @@ SHAPE = int|tuple[int,...]
 class DataSet:
     path: Path
     dtype: dtype
-    shape: SHAPE
     name: str=""
-    verbose: bool=False,
-    _writer_lock_type: int = fcntl.LOCK_EX,
-    _reader_lock_type: int = fcntl.LOCK_SH,
-    _reader_modes: tuple[str, ...] = ("r", "rb"),
 
     @classmethod
     def new(cls, path, dtype, shape, name, memmap_kwargs={}, **kwargs) -> DataSet:
@@ -72,35 +70,51 @@ class DataSet:
         )
         return DataSet(path, dtype, shape, name, **kwargs)
 
-    @contextmanager# or simply __enter__?
-    def open(self, mode="r"):
-        file_mode = mode if mode in ("r", "r+", "w+", "c") else "r+"
-        file_handler = open(path, file_mode)
+    @contextmanager
+    def open(
+        self, 
+        mode: str = "r",
+        verbose: bool=False,
+    ):
+        file = open(path, file_mode)
         try:
-            fcntl.flock(
-                file_handler,
-                _reader_lock_type if mode in _reader_modes else _writer_lock_type,
-            )
-            array = np.load(file_handler, mmap_mode=mode)
+            fcntl.flock(file, fcntl.LOCK_SH if mode in ("r", "rb") else fcntl.LOCK_EX)
+            array = np.load(file, mmap_mode=mode)
             yield array 
         finally:
             if not mode in self._reader_modes:
                 flush_start = time()
                 array.flush()
+                flush_runtime = time() - flush_start
                 if verbose:
-                    print(f"Flushed `{self.name}` in `{time()-flush_start} sec.`")
+                    print(f"Flushed `{self.name}` in `{flush_runtime} sec.`")
             del array
-            fcntl.flock(file_handler, fcntl.LOCK_UN)
-        
+            fcntl.flock(file, fcntl.LOCK_UN)
 
-class Transaction:
-    def __init__(self, index, datasets: DotDict):
-        self.index = index
+
+class DataTransaction:
+    def __init__(self, index_txn, datasets: DotDict):
+        self.index_txn = index_txn
         self.datasets = datasets
 
+    def __len__(self) -> int:
+        return self.index_stats()["entries"]
 
 
 class Cachemir:
+    def __init__(self, folder: str|Path) -> None:
+        """Open EXISTING dataset folder."""
+        self.folder = Path(folder)
+        with open(self.folder / "scheme.json", "r") as f:
+            scheme = json.load(f)
+        for col, dtype in scheme.items():
+            assert (self.folder / f"data/{col}.npy").exists()
+        self.index = Index(path=folder/"index", **index_kwargs)
+        self.datasets = DotDict(
+            col: DataSet(folder / "data/{col}.npy", dtype, col)
+            for col, dtype in scheme.items() 
+        )
+
     @classmethod
     def new(
         cls,
@@ -112,42 +126,32 @@ class Cachemir:
         """Create new dataset folder.
 
         Arguments:
-            folder (str|Path): 
+            folder (str|Path): Path to the DB.
+
         Returns:
-            Cachemir: A new instance."""
+            Cachemir: A new instance.
+        """
         folder = Path(folder)
         for subfolder in ("index", "data"):
             (folder / subfolder).mkdir(parents=True)
-
         with open(folder / "scheme.json", "w") as f:
             json.dump(np.dtype(list(scheme.items())).descr, f)
-
-        index = Index(path=folder / "index", **index_kwargs)# save **index_kwargs in index. not scheme not: then not human readable.
+        index = Index(path=folder / "index")# **kwargs likely unnecessary: make sure
         datasets = DotDict(
             col: DataSet.new(folder / f"data/{col}.npy", dtype, shape, col)
             for col, dtype in scheme.items()
         )
-        return cls(folder, index, datasets)
-
-    @classmethod
-    def open(cls, folder: str|Path) -> Cachemir:
-        """Open EXISTING dataset folder."""
-        folder = Path(folder)
-
-        with open(folder / "scheme.json", "r") as f:
-            scheme = json.load(f)
-
-        for col, dtype in scheme.items():
-            assert (self.folder / f"data/{col}.npy").exists()
-
-    def __init__(self, index: Index, datasets: DotDict[str, DataSet]):
-        self.index = index
-        self.datasets = datasets
-
-    def __enter__(self) -> Transaction:
-        return Transaction(index=index, datasets=datasets)
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        pass
+        return cls(folder)
+    
+    @contextmanager    
+    def open(self, mode: str="r") -> Iterator[DataTransaction]:
+        with ExitStack() as stack:
+            yield DataTransaction(
+                index = self.index.open(mode),
+                datasets = DotDict(col: dataset.open() for col, dataset in self.datasets )
+            )
+            
 
 
+cachemir = Cachemir.open(folder)
+with cachemir:

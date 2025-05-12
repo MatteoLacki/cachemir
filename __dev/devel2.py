@@ -142,86 +142,8 @@ def open_index(path, mode="r", map_size_bytes=2**30):
 
 from functools import partial
 
-@dataclass
-class Index:
-    path: str
-    map_size: int=2**30
-    max_dbs: int=1
-
-    @contextmanager
-    def open(self, mode="r"):
-        env = lmdb.open(self.path, map_size=self.map_size, max_dbs=self.max_dbs)
-        write = mode in ("r+", "w")
-        txn = env.begin(write=write)
-        try:
-            yield txn
-            if write:
-                txn.commit()
-        except Exception:
-            if write:
-                txn.abort()
-            raise
-        finally:
-            env.close()
-
-@dataclass
-class DataSet:
-    path: str
-
-    @contextmanager
-    def open(self, mode="r"):
-        ...
-
 
 # we could also make it that Cachemir will contain index and dataset handler openers.
-
-
-class Transaction:
-    def __init__(self, index, datasets: DotDict):
-        self.index = index
-        self.datasets = datasets
-
-
-
-class Cachemir2:
-    
-    @classmethod
-    def new(cls, folder: str|Path, scheme: dict["str",type], datasets_shape: int|tuple[int,...]=0,) -> Cachemir2:
-        """Create new dataset folder."""
-        folder = Path(folder)
-        for subfolder in ("index","data"):
-            (folder / subfolder).mkdir(parents=True)
-
-        with open(folder / "scheme.json", "w") as f:
-            json.dump(np.dtype(list(scheme.items())).descr, f)
-
-        # this should likely also create some arrays already.
-        for col, dtype in scheme.items():
-            pass# fill it up John...
-
-        return cls.open(folder)
-
-    @classmethod
-    def open(cls, folder: str|Path) -> Cachemir2:
-        """Open EXISTING dataset folder."""
-        folder = Path(folder)
-
-        with open(folder / "scheme.json", "r") as f:
-            scheme = json.load(f)
-
-        for column_name, dtype in scheme.items():
-            assert self.
-
-    def __init__(self, index: Index, datasets: DotDict[str, DataSet]):
-        self.index = index
-        self.datasets = datasets
-
-    def __enter__(self) -> Transaction:
-
-        return Transaction(index=index, datasets=datasets)
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        pass
 
 
 
