@@ -3,7 +3,6 @@
 %autoreload 2
 """
 
-
 import json
 import os
 
@@ -141,6 +140,36 @@ def open_index(path, mode="r", map_size_bytes=2**30):
 
 
 from functools import partial
+
+@dataclass
+class Index:
+    path: str
+    map_size: int=2**30
+    max_dbs: int=1
+
+    @contextmanager
+    def open(self, mode="r"):
+        env = lmdb.open(self.path, map_size=self.map_size, max_dbs=self.max_dbs)
+        write = mode in ("r+", "w")
+        txn = env.begin(write=write)
+        try:
+            yield txn
+            if write:
+                txn.commit()
+        except Exception:
+            if write:
+                txn.abort()
+            raise
+        finally:
+            env.close()
+
+@dataclass
+class DataSet:
+    path: str
+
+    @contextmanager
+    def open(self, mode="r"):
+        ...
 
 
 # we could also make it that Cachemir will contain index and dataset handler openers.

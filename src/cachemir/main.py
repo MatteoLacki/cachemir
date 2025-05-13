@@ -13,13 +13,13 @@ from __future__ import annotations
 import fcntl
 import json
 import lmdb
+import numpy as np
 
 from typing import Iterator
 
 from contextlib import ExitStack
 from contextlib import contextmanager
 from dataclasses import dataclass
-from massimo.data_structures import DotDict
 from pathlib import Path
 from time import time
 
@@ -31,9 +31,12 @@ class Index:
     Supposed to store indices and some non-grouped statistics.
     """
 
-    path: Path
+    path: str
     map_size: int = 2**30
     max_dbs: int = 1
+
+    def __post_init__(self):
+        self.path = str(self.path)
 
     @contextmanager
     def open(self, mode="r"):
@@ -63,13 +66,8 @@ class DataSet:
 
     @classmethod
     def new(cls, path, dtype, shape, name, memmap_kwargs={}, **kwargs) -> DataSet:
-        np.memmap(
-            path,
-            mode="w",
-            dtype=self.dtype,
-            **memmap_kwargs,
-        )
-        return DataSet(path, dtype, shape, name, **kwargs)
+        _ = np.memmap(path, mode="w+", dtype=dtype, shape=shape, **memmap_kwargs)
+        return DataSet(path, dtype, name, **kwargs)
 
     @contextmanager
     def open(
@@ -77,13 +75,25 @@ class DataSet:
         mode: str = "r",
         verbose: bool = False,
     ):
-        file = open(path, file_mode)
+        READER_MODES = ("r", "rb")
+        mode = "rb" if mode == "r" else mode
+        file = open(self.path, mode)
         try:
-            fcntl.flock(file, fcntl.LOCK_SH if mode in ("r", "rb") else fcntl.LOCK_EX)
-            array = np.load(file, mmap_mode=mode)
+            import fcntl
+            import numpy as np
+
+            fcntl.flock(
+                file,
+                fcntl.LOCK_SH if mode in READER_MODES else fcntl.LOCK_EX,
+            )
+            array = np.load(file, mmap_mode=mode, allow_pickle=True)
             yield array
+        except Exception as e:
+            print(e)
         finally:
-            if not mode in self._reader_modes:
+            from time import time
+
+            if not mode in READER_MODES:
                 flush_start = time()
                 array.flush()
                 flush_runtime = time() - flush_start
@@ -94,7 +104,7 @@ class DataSet:
 
 
 class DataTransaction:
-    def __init__(self, index_txn, datasets: DotDict):
+    def __init__(self, index_txn, datasets):
         self.index_txn = index_txn
         self.datasets = datasets
 
@@ -102,23 +112,20 @@ class DataTransaction:
         return self.index_stats()["entries"]
 
 
-# TODO: merge __init__ and new cause it is essentially the same thing?
+# TODO: merge __init__ and new cause it is essentially the same thing
 class Cachemir:
     def __init__(self, folder: str | Path) -> None:
         """Open EXISTING dataset folder."""
         self.folder = Path(folder)
-
         with open(self.folder / "scheme.json", "r") as f:
-            scheme = json.load(f)
+            scheme = dict(json.load(f))
         for col, dtype in scheme.items():
             assert (self.folder / f"data/{col}.npy").exists()
-        self.index = Index(path=folder / "index", **index_kwargs)
-        self.datasets = DotDict(
-            (
-                (col, DataSet(folder / "data/{col}.npy", dtype, col))
-                for col, dtype in scheme.items()
-            )
-        )
+        self.index = Index(path=str(folder / "index"))
+        self.datasets = {
+            col: DataSet(folder / f"data/{col}.npy", dtype, col)
+            for col, dtype in scheme.items()
+        }
 
     @classmethod
     def new(
@@ -141,21 +148,22 @@ class Cachemir:
             (folder / subfolder).mkdir(parents=True)
         with open(folder / "scheme.json", "w") as f:
             json.dump(np.dtype(list(scheme.items())).descr, f)
-        index = Index(path=folder / "index")  # **kwargs likely unnecessary: make sure
-        datasets = DotDict(
-            (
-                (col, DataSet.new(folder / f"data/{col}.npy", dtype, shape, col))
-                for col, dtype in scheme.items()
-            )
-        )
+        index = Index(
+            path=str(folder / "index")
+        )  # **kwargs likely unnecessary: make sure
+        datasets = {
+            col: DataSet.new(folder / f"data/{col}.npy", dtype, shape, col)
+            for col, dtype in scheme.items()
+        }
         return cls(folder)
 
     @contextmanager
-    def open(self, mode: str = "r") -> Iterator[DataTransaction]:
+    def open(self, mode: str = "r"):
         with ExitStack() as stack:
-            yield DataTransaction(
-                index=self.index.open(mode),
-                datasets=DotDict(
-                    ((col, dataset.open()) for col, dataset in self.datasets)
-                ),
-            )
+            index_txn = stack.enter_context(self.index.open(mode))
+            datasets = {
+                col: stack.enter_context(dataset.open(mode))
+                for col, dataset in self.datasets.items()
+            }
+
+            yield DataTransaction(index_txn, datasets)
