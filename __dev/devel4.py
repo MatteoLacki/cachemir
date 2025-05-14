@@ -46,6 +46,7 @@ inputs_df = pd.concat(
 inputs_df.columns = ["sequences", "charges", "collision_energies"]
 
 
+# where to put this code? cachemir sounds reasonable.
 def input_to_bytes(inputs, types):
     assert len(inputs) == len(types)
     inputs_in_user_types = tuple(_type(_input) for _type, _input in zip(types, inputs))
@@ -53,6 +54,8 @@ def input_to_bytes(inputs, types):
     return inputs_bytes
 
 
+# TODO: perhaps add this to the Prosit model instance.
+# then it would become a method.
 def get_index_and_stats(
     path,
     inputs_df: pd.DataFrame,
@@ -96,11 +99,11 @@ def get_index_and_stats(
 
         if len(missing_idxs) == 0:
             if verbose:
-                print("All inputs are cached.")
+                print("All calls were in cache.")
         else:
             if verbose:
-                print("Some input were not cached.")
-            idx = txn.stat()["entries"]  # current biggest result.
+                print(f"{len(missing_idxs)} calls were not in cache.")
+            idx = txn.stat()["entries"]  # current maximal idx
             missing_results = results_iter(
                 **{col: missing_df[col].to_numpy() for col in missing_df}
             )
@@ -108,7 +111,7 @@ def get_index_and_stats(
                 missing_results = tqdm(
                     missing_results,
                     total=len(missing_idxs),
-                    desc="Evaluating missing results",
+                    desc="Getting missing results",
                 )
 
             for missing_idx, missing_result in zip(missing_idxs, missing_results):
