@@ -10,18 +10,23 @@ TODO:
 """
 from __future__ import annotations
 
-import fcntl
+import functools
 import json
 import lmdb
+import msgpack
 import numpy as np
+import pandas as pd
 
+from tqdm import tqdm
 from typing import Iterator
 
-from contextlib import ExitStack
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from time import time
+
+from mmapped_df import DatasetWriter
+from mmapped_df import open_dataset
 
 
 @dataclass
@@ -55,115 +60,97 @@ class Index:
             env.close()
 
 
-SHAPE = int | tuple[int, ...]
-
-
 @dataclass
-class DataSet:
-    path: Path
-    dtype: dtype
-    name: str = ""
+class MemoizedOutput:
+    input: tuple
+    stats: tuple
+    data: pd.DataFrame
 
-    @classmethod
-    def new(cls, path, dtype, shape, name, memmap_kwargs={}, **kwargs) -> DataSet:
-        _ = np.memmap(path, mode="w+", dtype=dtype, shape=shape, **memmap_kwargs)
-        return DataSet(path, dtype, name, **kwargs)
 
-    @contextmanager
-    def open(
-        self,
-        mode: str = "r",
-        verbose: bool = False,
+def input_to_bytes(
+    inputs: tuple[int | float | str, ...],
+    types: tuple[type, ...],
+) -> bytes:
+    assert len(inputs) == len(types)
+    inputs_in_user_types = tuple(_type(_input) for _type, _input in zip(types, inputs))
+    inputs_bytes = msgpack.packb(inputs_in_user_types)
+    return inputs_bytes
+
+
+# TODO: perhaps add this to the Prosit model instance.
+def get_index_and_stats(
+    path: Path | str,
+    inputs_df: pd.DataFrame,
+    results_iter: Iterator[MemoizedOutput],
+    input_types: dict[str, type],
+    stats_types: dict[str, type],
+    verbose: bool = False,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """ """
+    path = Path(path)
+    path.mkdir(parents=True, exist_ok=True)
+
+    in2bytes = functools.partial(
+        input_to_bytes,
+        types=tuple(input_types.values()),
+    )
+    out2bytes = functools.partial(
+        input_to_bytes,
+        types=(int, int, *tuple(stats_types.values())),
+    )
+
+    with (
+        Index(path / "index.lmbd").open("w") as txn,
+        DatasetWriter(path / "data", append_ok=True) as mmapped_df,
     ):
-        READER_MODES = ("r", "rb")
-        mode = "rb" if mode == "r" else mode
-        file = open(self.path, mode)
-        try:
-            import fcntl
-            import numpy as np
-
-            fcntl.flock(
-                file,
-                fcntl.LOCK_SH if mode in READER_MODES else fcntl.LOCK_EX,
+        inputs = inputs_df.itertuples(index=False, name=None)
+        if verbose:
+            inputs = tqdm(
+                inputs,
+                total=len(inputs_df),
+                desc="Establishing what is cached",
             )
-            array = np.load(file, mmap_mode=mode, allow_pickle=True)
-            yield array
-        except Exception as e:
-            print(e)
-        finally:
-            from time import time
+        outputs = []
+        for _in in inputs:
+            value = txn.get(in2bytes(_in), None)
+            if value is not None:
+                value = tuple(msgpack.unpackb(value))
+            outputs.append(value)
 
-            if not mode in READER_MODES:
-                flush_start = time()
-                array.flush()
-                flush_runtime = time() - flush_start
-                if verbose:
-                    print(f"Flushed `{self.name}` in `{flush_runtime} sec.`")
-            del array
-            fcntl.flock(file, fcntl.LOCK_UN)
+        missing_idxs = [i for i, o in enumerate(outputs) if o is None]
+        missing_df = inputs_df.iloc[missing_idxs]
 
+        if len(missing_idxs) == 0:
+            if verbose:
+                print("All calls were in cache.")
+        else:
+            if verbose:
+                print(f"{len(missing_idxs)} calls were not in cache.")
+            idx = txn.stat()["entries"]  # current maximal idx
+            missing_results = results_iter(
+                **{col: missing_df[col].to_numpy() for col in missing_df}
+            )
+            if verbose:
+                missing_results = tqdm(
+                    missing_results,
+                    total=len(missing_idxs),
+                    desc="Getting missing results",
+                )
 
-class DataTransaction:
-    def __init__(self, index_txn, datasets):
-        self.index_txn = index_txn
-        self.datasets = datasets
+            for missing_idx, missing_result in zip(missing_idxs, missing_results):
+                out_stats = (idx, len(missing_result.data), *missing_result.stats)
+                txn.put(
+                    in2bytes(missing_result.input),
+                    out2bytes(out_stats),
+                )
+                mmapped_df.append_df(missing_result.data)
+                idx += len(missing_result.data)
+                assert outputs[missing_idx] is None
+                outputs[missing_idx] = out_stats
 
-    def __len__(self) -> int:
-        return self.index_stats()["entries"]
+    index_and_stats = pd.DataFrame(
+        outputs, copy=False, columns=["idx", "cnt", *list(stats_types)]
+    )
+    raw_data = open_dataset(path / "data")
 
-
-# TODO: merge __init__ and new cause it is essentially the same thing
-class Cachemir:
-    def __init__(self, folder: str | Path) -> None:
-        """Open EXISTING dataset folder."""
-        self.folder = Path(folder)
-        with open(self.folder / "scheme.json", "r") as f:
-            scheme = dict(json.load(f))
-        for col, dtype in scheme.items():
-            assert (self.folder / f"data/{col}.npy").exists()
-        self.index = Index(path=str(folder / "index"))
-        self.datasets = {
-            col: DataSet(folder / f"data/{col}.npy", dtype, col)
-            for col, dtype in scheme.items()
-        }
-
-    @classmethod
-    def new(
-        cls,
-        folder: str | Path,
-        scheme: dict["str", type],
-        shape: SHAPE = 0,
-        index_kwargs: dict[str, str | int] = {},
-    ) -> Cachemir:
-        """Create new dataset folder.
-
-        Arguments:
-            folder (str|Path): Path to the DB.
-
-        Returns:
-            Cachemir: A new instance.
-        """
-        folder = Path(folder)
-        for subfolder in ("index", "data"):
-            (folder / subfolder).mkdir(parents=True)
-        with open(folder / "scheme.json", "w") as f:
-            json.dump(np.dtype(list(scheme.items())).descr, f)
-        index = Index(
-            path=str(folder / "index")
-        )  # **kwargs likely unnecessary: make sure
-        datasets = {
-            col: DataSet.new(folder / f"data/{col}.npy", dtype, shape, col)
-            for col, dtype in scheme.items()
-        }
-        return cls(folder)
-
-    @contextmanager
-    def open(self, mode: str = "r"):
-        with ExitStack() as stack:
-            index_txn = stack.enter_context(self.index.open(mode))
-            datasets = {
-                col: stack.enter_context(dataset.open(mode))
-                for col, dataset in self.datasets.items()
-            }
-
-            yield DataTransaction(index_txn, datasets)
+    return index_and_stats, raw_data
