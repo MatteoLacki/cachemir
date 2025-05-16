@@ -18,6 +18,7 @@ import numpy as np
 import pandas as pd
 
 from tqdm import tqdm
+from typing import Iterable
 from typing import Iterator
 
 from contextlib import contextmanager
@@ -81,7 +82,7 @@ def input_to_bytes(
 def get_index_and_stats(
     path: Path | str,
     inputs_df: pd.DataFrame,
-    results_iter: Iterator[MemoizedOutput],
+    results_iter: Callable[[tuple[Iterable, ...]], Iterator[MemoizedOutput]],
     input_types: dict[str, type],
     stats_types: dict[str, type],
     verbose: bool = False,
