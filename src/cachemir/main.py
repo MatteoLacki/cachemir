@@ -129,13 +129,13 @@ def get_index_and_stats(
                 print(f"{len(missing_idxs)} calls were not in cache.")
             idx = txn.stat()["entries"]  # current maximal idx
             missing_results = results_iter(
-                **{col: missing_df[col].to_numpy() for col in missing_df}
+                **{col: missing_df[col].to_numpy() for col in missing_df},
             )
             if verbose:
                 missing_results = tqdm(
                     missing_results,
                     total=len(missing_idxs),
-                    desc="Getting missing results",
+                    desc="Saving missing results",
                 )
 
             for missing_idx, missing_result in zip(missing_idxs, missing_results):
