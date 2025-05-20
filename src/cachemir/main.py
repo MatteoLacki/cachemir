@@ -60,6 +60,11 @@ class EncodingTransation:
         return self.lmdb_transaction.stat()["entries"]
 
 
+def ITERTUPLES(df):
+    """How pandas should have set defaults in .itertuples"""
+    yield from df.itertuples(index=False, name=None)
+
+
 @dataclass
 class SimpleLMDB:
     """A simple wrapper around LMDB that works.
@@ -74,9 +79,13 @@ class SimpleLMDB:
         map_size (int): Size of the DB.
     """
 
-    encoder: Callable[[Any], bytes]
-    decoder: Callable[[bytes], Any]
     path: str
+    encoder: Callable[[Any], bytes] = partial(
+        msgpack.packb, default=msgpack_numpy.encode
+    )
+    decoder: Callable[[bytes], Any] = partial(
+        msgpack.unpackb, object_hook=msgpack_numpy.decode
+    )
     map_size: int = 2**30
 
     def __post_init__(self):
@@ -103,60 +112,50 @@ class SimpleLMDB:
         finally:
             env.close()
 
+    def iter_IO(
+        self,
+        iter_eval: Callable[[pd.DataFrame], Iterable[tuple[tuple, pd.DataFrame]]],
+        inputs_df: pd.DataFrame,
+        input_types: dict[str, type] | None = None,
+        meta: dict[str, str | float | int] = {},
+    ) -> Iterator[tuple[tuple, dict[str, npt.NDArray]]]:
+        """Iter results from cache if they are there, else get them there.
 
-def ITERTUPLES(df):
-    """How pandas should have set defaults in .itertuples"""
-    yield from df.itertuples(index=False, name=None)
+        Arguments:
+            iter_eval (Callable): A function that returns an iterable sequence of pairs (input, output), where input is a tuple and output a data frame.
+            inputs_df (pd.DataFrame): Input to query the DB. A subset of those might be submitted to `iter_eval` so make sure this can go smoothly.
+            input_types (dict|None): Optional types for the input. If not provided will be derived. Output types will be automatically saved.
+            meta (dict): Optional information about what is saved.
 
+        Yields:
+            tuple of inputs tuple and outputs dictionary mapping column names to numpy arrays.
+        """
+        if input_types is None:
+            input_types = derive_input_types(inputs_df)
+        serializable_input_types = {c: type_to_name[t] for c, t in input_types.items()}
+        sanitize_types = partial(enforce_types, types=tuple(input_types.values()))
 
-def iter_cache_results(
-    cache_path: Path,
-    iter_eval: Callable[[pd.DataFrame], Iterable[tuple[tuple, pd.DataFrame]]],
-    inputs_df: pd.DataFrame,
-    input_types: dict[str, type] | None = None,
-    lmdb_map_size: int = 2**30,
-) -> Iterator[tuple[tuple, dict[str, npt.NDArray]]]:
-    """Iter results from cache if they are there, else get them there.
+        with self.open("w") as txn:
+            if not "__input_types__" in txn:
+                txn["__input_types__"] = serializable_input_types
+            assert txn["__input_types__"] == serializable_input_types
 
-    Arguments:
-        cache_path (Path): Path to the on-disk cache (HDD is good enough).
-        iter_eval (Callable): A function that returns an iterable sequence of pairs (input, output), where input is a tuple and output a data frame.
-        inputs_df (pd.DataFrame): Input to query the DB. A subset of those might be submitted to `iter_eval` so make sure this can go smoothly.
-        input_types (dict|None): Optional types for the input. If not provided will be derived. Output types will be automatically saved.
+            if len(meta) and not "__meta__" in txn:
+                txn["__meta__"] = meta
 
-    Yields:
-        tuple of inputs tuple and outputs dictionary mapping column names to numpy arrays.
-    """
-    if input_types is None:
-        input_types = derive_input_types(inputs_df)
+            missing_idxs = [
+                i
+                for i, inputs in enumerate(map(sanitize_types, ITERTUPLES(inputs_df)))
+                if not inputs in txn
+            ]
+            if len(missing_idxs):
+                missing_df = inputs_df.iloc[missing_idxs].drop_duplicates()
+                for inputs, results_df in iter_eval(missing_df):
+                    txn[sanitize_types(inputs)] = df2dct(results_df)
 
-    db = SimpleLMDB(
-        encoder=partial(msgpack.packb, default=msgpack_numpy.encode),
-        decoder=partial(msgpack.unpackb, object_hook=msgpack_numpy.decode),
-        path=cache_path,
-        map_size=lmdb_map_size,
-    )
-    sanitize_types = partial(enforce_types, types=tuple(input_types.values()))
-
-    with db.open("w") as txn:
-        if not "__input_types__" in txn:
-            txn["__input_types__"] = {
-                c: type_to_name[t] for c, t in input_types.items()
-            }
-
-        missing_idxs = [
-            i
-            for i, inputs in enumerate(map(sanitize_types, ITERTUPLES(inputs_df)))
-            if not inputs in txn
-        ]
-        if len(missing_idxs):
-            missing_df = inputs_df.iloc[missing_idxs].drop_duplicates()
-            for inputs, results_df in iter_eval(missing_df):
-                txn[sanitize_types(inputs)] = df2dct(results_df)
-
-    with db.open("r") as txn:  # switching to reading: assuming appenders only
-        for inputs in map(sanitize_types, ITERTUPLES(inputs_df)):
-            yield inputs, txn[inputs]
+        with self.open("r") as txn:  # assuming appenders only
+            for inputs in map(sanitize_types, ITERTUPLES(inputs_df)):
+                yield inputs, txn[inputs]
 
 
 #### BELOW: COMPATIBILITY, NO IMMEDIATE USE-CAS
