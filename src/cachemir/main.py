@@ -22,6 +22,8 @@ from tqdm import tqdm
 
 from cachemir.pandas_ops import df2dct
 from cachemir.serialization import derive_input_types
+from cachemir.serialization import enforce_types
+from cachemir.serialization import type_to_name
 
 
 @dataclass
@@ -112,6 +114,7 @@ def iter_cache_results(
     iter_eval: Callable[[pd.DataFrame], Iterable[tuple[tuple, pd.DataFrame]]],
     inputs_df: pd.DataFrame,
     input_types: dict[str, type] | None = None,
+    lmdb_map_size: int = 2**30,
 ) -> Iterator[tuple[tuple, dict[str, npt.NDArray]]]:
     """Iter results from cache if they are there, else get them there.
 
@@ -128,9 +131,10 @@ def iter_cache_results(
         input_types = derive_input_types(inputs_df)
 
     db = SimpleLMDB(
-        encoder=partial(msgpack.packb, default=m.encode),
-        decoder=partial(msgpack.unpackb, object_hook=m.decode),
+        encoder=partial(msgpack.packb, default=msgpack_numpy.encode),
+        decoder=partial(msgpack.unpackb, object_hook=msgpack_numpy.decode),
         path=cache_path,
+        map_size=lmdb_map_size,
     )
     sanitize_types = partial(enforce_types, types=tuple(input_types.values()))
 
