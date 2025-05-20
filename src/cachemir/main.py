@@ -10,24 +10,139 @@ TODO:
 """
 from __future__ import annotations
 
-import functools
 import json
+
 import lmdb
 import msgpack
+import msgpack_numpy
 import numpy as np
 import pandas as pd
 
-from tqdm import tqdm
+from contextlib import contextmanager
+from dataclasses import dataclass
+from functools import partial
+from pathlib import Path
+from typing import ContextManager
 from typing import Iterable
 from typing import Iterator
 
-from contextlib import contextmanager
-from dataclasses import dataclass
-from pathlib import Path
-from time import time
+from tqdm import tqdm
 
-from mmapped_df import DatasetWriter
-from mmapped_df import open_dataset
+from cachemir.pandas_ops import df2dct
+from cachemir.serialization import derive_input_types
+
+
+@dataclass
+class EncodingTransation:
+    lmdb_transaction: lmbd.Transation
+    encoder: typing.Callable
+    decoder: typing.Callable
+
+    def __setitem__(self, key, value):
+        self.lmdb_transaction.put(self.encoder(key), self.encoder(value))
+
+    def __getitem__(self, key):
+        return self.decoder(self.lmdb_transaction.get(self.encoder(key)))
+
+    def get(self, key, default):
+        value = self.lmdb_transaction.get(self.encoder(key))
+        if value is None:
+            return default
+        return self.decoder(value)
+
+    def __contains__(self, key) -> bool:
+        value = self.lmdb_transaction.get(self.encoder(key))
+        return not value is None
+
+    def __len__(self):
+        return self.lmdb_transaction.stat()["entries"]
+
+
+@dataclass
+class SimpleLMDB:
+    encoder: typing.Callable
+    decoder: typing.Callable
+    path: str
+    map_size: int = 2**30
+    max_dbs: int = 1
+
+    def __post_init__(self):
+        self.path = str(self.path)
+
+    @contextmanager
+    def open(self, mode="r") -> ContextManager[EncodingTransation]:
+        env = lmdb.open(self.path, map_size=self.map_size, max_dbs=self.max_dbs)
+        write = mode in ("r+", "w")
+        txn = EncodingTransation(
+            lmdb_transaction=env.begin(write=write),
+            encoder=self.encoder,
+            decoder=self.decoder,
+        )
+        try:
+            yield txn
+            if write:
+                txn.lmdb_transaction.commit()
+        except Exception:
+            if write:
+                txn.lmdb_transaction.abort()
+            raise
+        finally:
+            env.close()
+
+
+def ITERTUPLES(df):
+    yield from df.itertuples(index=False, name=None)
+
+
+def iter_cache_results(
+    cache_path: Path,
+    iter_eval: Callable[[pd.DataFrame], Iterable[tuple[tuple, pd.DataFrame]]],
+    inputs_df: pd.DataFrame,
+    input_types: dict[str, type] | None = None,
+) -> Iterator[tuple[tuple, dict[str, npt.NDArray]]]:
+    """Iter results from cache if they are there, else get them there.
+
+    Arguments:
+        cache_path (Path): Path to the on-disk cache (HDD is good enough).
+        iter_eval (Callable): A function that returns an iterable sequence of pairs (input, output), where input is a tuple and output a data frame.
+        inputs_df (pd.DataFrame): Input to query the DB. A subset of those might be submitted to `iter_eval` so make sure this can go smoothly.
+        input_types (dict|None): Optional types for the input. If not provided will be derived. Output types will be automatically saved.
+
+    Yields:
+        tuple of inputs tuple and outputs dictionary mapping column names to numpy arrays.
+    """
+    if input_types is None:
+        input_types = derive_input_types(inputs_df)
+
+    db = SimpleLMDB(
+        encoder=partial(msgpack.packb, default=m.encode),
+        decoder=partial(msgpack.unpackb, object_hook=m.decode),
+        path=cache_path,
+    )
+    sanitize_types = partial(enforce_types, types=tuple(input_types.values()))
+
+    with db.open("w") as txn:
+        if not "__input_types__" in txn:
+            txn["__input_types__"] = {
+                c: type_to_name[t] for c, t in input_types.items()
+            }
+
+        missing_idxs = [
+            i
+            for i, inputs in enumerate(map(sanitize_types, ITERTUPLES(inputs_df)))
+            if not inputs in txn
+        ]
+        if len(missing_idxs):
+            missing_df = inputs_df.iloc[missing_idxs].drop_duplicates()
+            for inputs, results_df in iter_eval(missing_df):
+                txn[sanitize_types(inputs)] = df2dct(results_df)
+
+    with db.open("r") as txn:  # switching to reading: assuming appenders only
+        for inputs in map(sanitize_types, ITERTUPLES(inputs_df)):
+            yield inputs, txn[inputs]
+
+
+#### BELOW: COMPATIBILITY, NO IMMEDIATE USE-CAS
 
 
 @dataclass
@@ -35,6 +150,7 @@ class Index:
     """LMDB based index for the memory mapped files.
 
     Supposed to store indices and some non-grouped statistics.
+
     """
 
     path: str
@@ -78,10 +194,6 @@ def input_to_bytes(
     return inputs_bytes
 
 
-def ITERTUPLES(df):
-    yield from df.itertuples(index=False, name=None)
-
-
 def get_index_and_stats(
     path: Path | str,
     inputs_df: pd.DataFrame,
@@ -91,14 +203,17 @@ def get_index_and_stats(
     verbose: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """ """
+    from mmapped_df import DatasetWriter
+    from mmapped_df import open_dataset
+
     path = Path(path)
     path.mkdir(parents=True, exist_ok=True)
 
-    in2bytes = functools.partial(
+    in2bytes = partial(
         input_to_bytes,
         types=tuple(input_types.values()),
     )
-    out2bytes = functools.partial(
+    out2bytes = partial(
         input_to_bytes,
         types=(int, int, *tuple(stats_types.values())),
     )
