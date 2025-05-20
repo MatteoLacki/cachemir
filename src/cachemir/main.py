@@ -69,7 +69,7 @@ def ITERTUPLES(df):
 class SimpleLMDB:
     """A simple wrapper around LMDB that works.
 
-    The only inoptimal things is that with each open we use lmdb.open.
+    The only unoptimal things is that with each open we use lmdb.open.
     But we have long transcations so that's not a problem and without it it would not work.
 
     Arguments:
