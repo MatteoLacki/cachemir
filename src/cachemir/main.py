@@ -1,13 +1,3 @@
-"""
-Basic implementation of file-system based memoization scheme.
-
-TODO: 
-* each dataset as separate file
-* each dataset of the same size in a subfolder grouping them together?
-* perhaps context managers should return some classes with methods like len and some fields like types?
-
-
-"""
 from __future__ import annotations
 
 import json
@@ -22,6 +12,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
+from typing import Any
+from typing import Callable
 from typing import ContextManager
 from typing import Iterable
 from typing import Iterator
@@ -34,9 +26,17 @@ from cachemir.serialization import derive_input_types
 
 @dataclass
 class EncodingTransation:
+    """A wrappar around lmbd.Transation that simplfies its usage.
+
+    Arguments:
+        lmdb_transaction (lmbd.Transation): A transaction.
+        encoder (Callable): A function taking input and serializing it to bytes.
+        decoder (Callable): The inverse of `encoder`.
+    """
+
     lmdb_transaction: lmbd.Transation
-    encoder: typing.Callable
-    decoder: typing.Callable
+    encoder: Callable[[Any], bytes]
+    decoder: Callable[[bytes], Any]
 
     def __setitem__(self, key, value):
         self.lmdb_transaction.put(self.encoder(key), self.encoder(value))
@@ -60,18 +60,30 @@ class EncodingTransation:
 
 @dataclass
 class SimpleLMDB:
-    encoder: typing.Callable
-    decoder: typing.Callable
+    """A simple wrapper around LMDB that works.
+
+    The only inoptimal things is that with each open we use lmdb.open.
+    But we have long transcations so that's not a problem and without it it would not work.
+
+    Arguments:
+        encoder (Callable): A function taking input and serializing it to bytes.
+        decoder (Callable): The inverse of `encoder`.
+        path (str): Where to keep the data (a folder).
+        map_size (int): Size of the DB.
+    """
+
+    encoder: Callable[[Any], bytes]
+    decoder: Callable[[bytes], Any]
     path: str
     map_size: int = 2**30
-    max_dbs: int = 1
 
     def __post_init__(self):
         self.path = str(self.path)
 
     @contextmanager
     def open(self, mode="r") -> ContextManager[EncodingTransation]:
-        env = lmdb.open(self.path, map_size=self.map_size, max_dbs=self.max_dbs)
+        """Open a transacation."""
+        env = lmdb.open(self.path, map_size=self.map_size, max_dbs=1)
         write = mode in ("r+", "w")
         txn = EncodingTransation(
             lmdb_transaction=env.begin(write=write),
@@ -91,6 +103,7 @@ class SimpleLMDB:
 
 
 def ITERTUPLES(df):
+    """How pandas should have set defaults in .itertuples"""
     yield from df.itertuples(index=False, name=None)
 
 
