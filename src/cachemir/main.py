@@ -20,8 +20,8 @@ from typing import Iterator
 
 from tqdm import tqdm
 
-from cachemir.pandas_ops import df2dct
-from cachemir.serialization import derive_input_types
+from cachemir.pandas_ops import pandas2dct
+from cachemir.serialization import derive_types
 from cachemir.serialization import enforce_types
 from cachemir.serialization import type_to_name
 
@@ -41,7 +41,10 @@ class EncodingTransation:
     decoder: Callable[[bytes], Any]
 
     def __setitem__(self, key, value):
-        self.lmdb_transaction.put(self.encoder(key), self.encoder(value))
+        self.lmdb_transaction.put(
+            self.encoder(key),
+            self.encoder(pandas2dct(value)),
+        )
 
     def __getitem__(self, key):
         return self.decoder(self.lmdb_transaction.get(self.encoder(key)))
@@ -114,7 +117,9 @@ class SimpleLMDB:
 
     def iter_IO(
         self,
-        iter_eval: Callable[[pd.DataFrame], Iterable[tuple[tuple, pd.DataFrame]]],
+        iter_eval: Callable[
+            [pd.DataFrame], Iterable[tuple[tuple, pd.DataFrame | float | int | str]]
+        ],
         inputs_df: pd.DataFrame,
         input_types: dict[str, type] | None = None,
         meta: dict[str, str | float | int] = {},
@@ -122,8 +127,8 @@ class SimpleLMDB:
         """Iter results from cache if they are there, else get them there.
 
         Arguments:
-            iter_eval (Callable): A function that returns an iterable sequence of pairs (input, output), where input is a tuple and output a data frame.
-            inputs_df (pd.DataFrame): Input to query the DB. A subset of those might be submitted to `iter_eval` so make sure this can go smoothly.
+            iter_eval (Callable): A function that returns an iterable sequence of pairs (input, output), where input for the memoized function and output is its output.
+            inputs_df (pd.DataFrame): Input to query the DB. A subset of those might be submitted to `iter_eval` so make sure this can go smoothly. LIKELY BETTER IF COLUMNS OF THIS DATAFRAME CONTAINED ONLY MODEL INPUTS.
             input_types (dict|None): Optional types for the input. If not provided will be derived. Output types will be automatically saved.
             meta (dict): Optional information about what is saved.
 
@@ -131,9 +136,12 @@ class SimpleLMDB:
             tuple of inputs tuple and outputs dictionary mapping column names to numpy arrays.
         """
         if input_types is None:
-            input_types = derive_input_types(inputs_df)
+            input_types = derive_types(inputs_df)
+
+        sanitize_types: Callable[[tuple], tuple] = partial(
+            enforce_types, types=tuple(input_types.values())
+        )
         serializable_input_types = {c: type_to_name[t] for c, t in input_types.items()}
-        sanitize_types = partial(enforce_types, types=tuple(input_types.values()))
 
         with self.open("w") as txn:
             if not "__input_types__" in txn:
@@ -150,8 +158,8 @@ class SimpleLMDB:
             ]
             if len(missing_idxs):
                 missing_df = inputs_df.iloc[missing_idxs].drop_duplicates()
-                for inputs, results_df in iter_eval(missing_df):
-                    txn[sanitize_types(inputs)] = df2dct(results_df)
+                for inputs, results in iter_eval(missing_df):
+                    txn[sanitize_types(inputs)] = results
 
         with self.open("r") as txn:  # assuming appenders only
             for inputs in map(sanitize_types, ITERTUPLES(inputs_df)):

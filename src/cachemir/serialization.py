@@ -47,7 +47,7 @@ numpy_to_python_type = {
 }
 
 
-def derive_input_types(inputs_df: pd.DataFrame) -> dict[str, type]:
+def derive_types(inputs_df: pd.DataFrame) -> dict[str, type]:
     return {
         col: numpy_to_python_type.get(type(val), type(val))
         for val, col in zip(inputs_df.iloc[0], inputs_df.columns)
