@@ -10,6 +10,16 @@ from prosit_timsTOF_2023_wrapper.main import Prosit2023TimsTofWrapper
 from prosit_timsTOF_2023_wrapper.normalizations import normalize_to_sum
 
 
+                                                                                                                                                                        
+import numpy as np                                        
+                                                                                                                                                                                                                                                                                                                                                
+frames_in = np.fromfile(f'temp/F9477/events.ms1/tof_urt_scan_ordered_data.mmappet/0.bin', dtype=np.uint32)         
+frames_in = np.memmap(
+    "temp/F9477/events.ms1/tof_urt_scan_ordered_data.mmappet/0.bin",
+    dtype=np.uint32,
+    mode="r"
+)
+
 sequences = np.array(["PEPTIDE", "PEPTIDECPEPTIDE"])
 amino_acid_cnts = np.array(list(map(len, sequences)))
 collision_energies = np.array([30.0, 31.1])
